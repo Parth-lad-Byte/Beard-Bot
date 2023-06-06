@@ -1,6 +1,8 @@
+!! Note This Bot is still in devlopment !!
+
 # Discord Bot
  Discord Bot is a versatile bot that provides various features and commands for managing your Discord server.
- Note This Bot is still in devlopment !!
+
 
 ## Music Commands
 
