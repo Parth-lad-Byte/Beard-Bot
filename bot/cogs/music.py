@@ -71,9 +71,6 @@ class Queue:
     def queue(self):
         return self._queue
 
-
-
-
 class PlayerControls(disnake.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -518,7 +515,7 @@ async def on_button_click(inter):
     elif custom_id == "stop":
         inter.guild.voice_client.stop()
         await inter.message.edit(content="Stopped the song.")
-    elif custom_id == "cm":
+    elif custom_id == "send_dm":
         if inter.guild.id in currently_playing:
             song = currently_playing[inter.guild.id]
             message = f"Here is the song you liked:\nView on YouTube: {song.youtube_url}"
@@ -582,11 +579,18 @@ async def _help(inter):
         ("/join", "Join the voice channel"),
         ("/info", "Show bot information"),
         ("/ping", "Check the bot's latency"),
+        ("/clear_chat", "Clear all messages in text chat and bot dissconnects"),
+    ]
+
+    bot_utility = [
+        ("/setup_role", "Setup a role Reaction"),
+        ("/setup_serverstats", "Setup server statistics")
     ]
     
     voice_commands = [
-        ("/drag", "Move users in a voice channel to another voice channel :"),
+        ("/Move", "Move users in a voice channel to another voice channel"),
     ]
+
 
     embed = disnake.Embed(title="Help", description="List of available commands", color=disnake.Color.blue())
     

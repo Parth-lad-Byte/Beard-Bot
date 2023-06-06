@@ -1,7 +1,6 @@
 import disnake
 from disnake.ext import commands
 from bot.config import TOKEN
-from bot.cogs import admin
 from bot.bot import MyBot
 import bot.config
 import asyncio
@@ -25,7 +24,6 @@ bot.token = TOKEN
 
 # Load the cogs
 bot.load_extension('bot.cogs.music')
-bot.load_extension('bot.cogs.admin')
 
 
 @bot.event
