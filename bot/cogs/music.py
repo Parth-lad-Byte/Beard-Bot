@@ -557,8 +557,10 @@ class QueueControl(ui.View):
 @bot.event
 async def on_ready():
     print(f"Bot is ready: {bot.user.name}")
-    funny_status = "with your mom!"
-    await bot.change_presence(activity=disnake.Game(name=funny_status))
+    funny_status = "/help | Report any Issues to @daddylad"
+    truncated_status = (funny_status[:46] + "...") if len(funny_status) > 49 else funny_status
+    await bot.change_presence(activity=disnake.Activity(type=disnake.ActivityType.listening, name=truncated_status))
+
 
 # Function to get the command signature for a given command
 def get_command_signature(command: commands.Command):
@@ -591,18 +593,24 @@ async def _help(inter):
         ("/Move", "Move users in a voice channel to another voice channel"),
     ]
 
-
     embed = disnake.Embed(title="Help", description="List of available commands", color=disnake.Color.blue())
-    
-    # Add fields for each command category
+
+    # Add music commands
     if music_commands:
         music_commands_text = "\n".join([f"{cmd} - {desc}" for cmd, desc in music_commands])
         embed.add_field(name="Music Commands", value=f"```{music_commands_text}```", inline=False)
-    
+
+    # Add utility commands
     if utility_commands:
         utility_commands_text = "\n".join([f"{cmd} - {desc}" for cmd, desc in utility_commands])
         embed.add_field(name="Utility Commands", value=f"```{utility_commands_text}```", inline=False)
-    
+
+    # Add bot utility commands
+    if bot_utility:
+        bot_utility_text = "\n".join([f"{cmd} - {desc}" for cmd, desc in bot_utility])
+        embed.add_field(name="Bot Utility Commands", value=f"```{bot_utility_text}```", inline=False)
+
+    # Add voice commands
     if voice_commands:
         voice_commands_text = "\n".join([f"{cmd} - {desc}" for cmd, desc in voice_commands])
         embed.add_field(name="Voice Commands", value=f"```{voice_commands_text}```", inline=False)
@@ -613,8 +621,6 @@ async def _help(inter):
     embed.add_field(name="Support Me", value="[Buy Me a Coffee](https://www.buymeacoffee.com/parthlad)", inline=False)
     embed.add_field(name="Your support means the world to me! ❤️", value="\u200b")
   
-
-
     # Send the embed as a response
     await inter.response.send_message(embed=embed)
 
@@ -635,16 +641,6 @@ async def ping(inter):
     # Create the embed
     embed = disnake.Embed(title="Pong! :ping_pong:", color=disnake.Color.green())
     embed.add_field(name="Latency", value=f"{ping_value}ms", inline=False)
-
-    # Set the footer with library information
-    # Add a blank field to separate the commands from the footer
-    embed.add_field(name="\u200b", value="\u200b", inline=False)
-    embed.set_footer(text="Made with ❤️ by Parth")
-    embed.add_field(name="Support Me", value="[Buy Me a Coffee](https://www.buymeacoffee.com/parthlad)", inline=False)
-    embed.add_field(name="Your support means the world to me! ❤️", value="\u200b")
-  
-
-
 
     # Send the embed as a response
     await inter.response.send_message(embed=embed)
@@ -687,9 +683,6 @@ async def show_info(inter):
     embed.set_footer(text="Made with ❤️ by Parth")
     embed.add_field(name="Support Me", value="[Buy Me a Coffee](https://www.buymeacoffee.com/parthlad)", inline=False)
     embed.add_field(name="Your support means the world to me! ❤️", value="\u200b")
-  
-
-
     # Send the embed as a response
     await inter.response.send_message(embed=embed)
 
