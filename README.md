@@ -39,4 +39,4 @@ Role Reaction:
 
 Simpified and Organized Help command :
 
-![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/69c1cb01-e9f9-458a-bdaf-24f5ba8675d5)
+![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/622f8de8-62bf-4dd9-b2a2-feefd9bdbf4d)
