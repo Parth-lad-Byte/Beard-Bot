@@ -28,5 +28,7 @@
 
 - `/move`: Move users in a voice channel to another voice channel
 
-Images from bot :
+
 ![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/708a3903-16a3-4560-815e-8008669ef60d)
+![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/a3279e2f-e3f1-4ac7-ba3c-cc65c814f791)
+![Uploading image.png…]()
