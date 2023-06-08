@@ -36,3 +36,7 @@ ________________________________________________________________________________
 Role Reaction: 
 
 ![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/a3279e2f-e3f1-4ac7-ba3c-cc65c814f791)
+
+Simpified and Organized Help command :
+
+![image](https://github.com/Parth-lad-Byte/Beard-Bot/assets/73304161/69c1cb01-e9f9-458a-bdaf-24f5ba8675d5)
