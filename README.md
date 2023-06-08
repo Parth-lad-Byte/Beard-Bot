@@ -27,3 +27,6 @@
 ## Voice Commands
 
 - `/move`: Move users in a voice channel to another voice channel
+
+Images from bot :
+https://imgur.com/5fILQOT
