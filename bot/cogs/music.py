@@ -23,18 +23,23 @@ from disnake.ui import View, Button
 from typing import Optional
 import aiohttp
 from disnake import Embed
+from epicstore_api import EpicGamesStoreAPI
+from collections import deque
+import googleapiclient.discovery
+import os
+from disnake import Option
+from discord.ext import tasks
+
 
 user_preferences = {}
 # Store the currently playing song for each guild
-
 global currently_playing
 players = {}
 currently_playing = {}
 queues = {}
 playerconrols = {}
 paused_songs = {}
-
-
+page_data = {}
 # Set up Spotify API credentials
 spotify_credentials = SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
 spotify = spotipy.Spotify(client_credentials_manager=spotify_credentials)
@@ -42,27 +47,70 @@ spotify = spotipy.Spotify(client_credentials_manager=spotify_credentials)
 bot = commands.Bot(command_prefix='/', intents=disnake.Intents.all(), help_command=None)
 
 start_time = datetime.datetime.utcnow()
+class YTDLSource(discord.PCMVolumeTransformer):
+    def __init__(self, source, *, data, volume=0.5):
+        super().__init__(source, volume)
 
+        self.data = data
+
+        self.title = data.get('title')
+        self.url = data.get('url')
+
+    @classmethod
+    async def create_source(cls, bot, url, loop, download=False):
+        ytdl = youtube_dl.YoutubeDL({'format': 'bestaudio/best', 'noplaylist': 'True'})
+
+        if download:
+            ytdl.params['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+
+        loop = loop or asyncio.get_event_loop()
+
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=download))
+        if 'entries' in data:
+            # If it's a playlist, select the first entry
+            data = data['entries'][0]
+
+        ffmpeg_options = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn',
+        }
+
+        source = await discord.FFmpegPCMAudio(data['url'], **ffmpeg_options)
+        return cls(source, data=data)
 class Queue:
     def __init__(self):
-        self._queue = []
-        self.current = None
+        self._queue = deque()
+        self.current_song = None
 
-    def add(self, song):
-        self._queue.append(song)
-
-    def get_next(self):
-        if self._queue:
-            self.current = self._queue.pop(0)
-        else:
-            self.current = None
-        return self.current
+    def add(self, item):
+        self._queue.append(item)
 
     def dequeue(self):
-        return self.get_next()
+        return self._queue.popleft()
+
+    def remove_song(self, index):
+        if 0 <= index < len(self._queue):
+            self._queue.pop(index)
+
+    def clear_queue(self):
+        self._queue.clear()
 
     def is_empty(self):
-        return len(self._queue) == 0
+        return not self._queue
+
+    async def play_next_song(self):
+        if self.is_empty():
+            await self.clear_queue()
+            return
+
+        next_song = self.dequeue()
+        source = await YTDLSource.create_source(self.bot, next_song['url'], loop=self.bot.loop, download=False)
+        self.current_song = next_song
+        self.voice_client.play(source, after=lambda _: asyncio.run_coroutine_threadsafe(self.play_next_song(), self.bot.loop))
 
     def size(self):
         return len(self._queue)
@@ -80,18 +128,16 @@ class PlayerControls(disnake.ui.View):
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🔁", custom_id="replay"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="💌", custom_id="send_dm"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🗑️", custom_id="clear"))  # Clear button
-        self.add_item(VolumeButton('-', -25))
-        self.add_item(VolumeButton('+', 25))
-
-
 
 class VolumeControl(ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
-        
-class ControlsView(PlayerControls, VolumeControl):
+        super().__init__()
+
+class ControlsView(PlayerControls):
     def __init__(self):
         super().__init__()
+        self.add_item(VolumeButton('-', -25))
+        self.add_item(VolumeButton('+', 25))
 
 class VolumeButton(ui.Button):
     def __init__(self, label, volume_delta):
@@ -128,8 +174,6 @@ class Music(commands.Cog):
             await get_youtube_song(inter, song, add_to_queue=True)  # Add to queue if a song is playing
         else:
             await get_youtube_song(inter, song, add_to_queue=False)  # Play immediately if no song is playing
-
-
 
     @commands.command()
     async def join(self, ctx):
@@ -225,7 +269,7 @@ async def play_song(ctx, info):
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     }
 
-    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='C:\\ffmpeg\\bin\\ffmpeg.exe')
+    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='usr/bin/ffmpeg')
     volume_transformer = disnake.PCMVolumeTransformer(source)
     
     # After the current song ends, it will play the next song in the queue.
@@ -243,25 +287,102 @@ async def play_song(ctx, info):
     embed.add_field(name="Duration", value=duration, inline=False)
     embed.set_thumbnail(url=thumbnail)
     embed.set_footer(text=f"Requested by: {requested_by}")
-    row = PlayerControls()
-    volume_control = VolumeControl()
-    view = disnake.ui.View()
-    for item in volume_control.children:
-        view.add_item(item)
-    for item in row.children:
-        view.add_item(item)
-    message = await ctx.send(embed=embed, view=view)
-
-    volume_control.message = message
+    view = ControlsView()
+    await ctx.send(embed=embed, view=view)
 
 def get_youtube_url(video_id):
     return f"https://www.youtube.com/watch?v={video_id}"
 
+
+# Function to fetch playlist information using YouTube Data API
+async def fetch_playlist_info(playlist_id):
+    api_key = os.getenv('YOUTUBE_API_KEY')  # Replace with your YouTube Data API key
+
+    youtube = googleapiclient.discovery.build('youtube', 'v3', developerKey=api_key)
+    request = youtube.playlistItems().list(
+        part='snippet',
+        playlistId=playlist_id,
+        maxResults=50  # Adjust the maximum number of results as needed
+    )
+
+    try:
+        response = await request.execute()
+        playlist_info = {
+            'tracks': []
+        }
+
+        for item in response.get('items', []):
+            track_info = item['snippet']
+            song = {
+                'id': track_info['resourceId']['videoId'],
+                'title': track_info['title'],
+                'url': f"https://www.youtube.com/watch?v={track_info['resourceId']['videoId']}",
+                'thumbnail': track_info['thumbnails']['default']['url'],
+                'duration': 'Unknown',  # You can fetch the duration using additional API calls if needed
+                'requested_by': 'Unknown'  # Set the requested_by field as needed
+            }
+            playlist_info['tracks'].append(song)
+
+        return playlist_info
+
+    except googleapiclient.errors.HttpError as e:
+        print(f"Error fetching playlist information: {e}")
+        return None
+
+
+async def get_youtube_song(inter, search_query, add_to_queue=True):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'default_search': 'ytsearch:',
+        'extractor_args': {
+            'youtube': {'noplaylist': True},
+            'soundcloud': {},
+        },
+    }
+
+    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(search_query, download=False)
+        if 'entries' in info:
+            info = info['entries'][0]
+
+    if info is None:
+        await inter.send("Error: Unable to fetch the song URL.")
+        return
+
+    if add_to_queue:
+        queues[inter.guild.id].add(info)
+        if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
+            await play_song(inter, info)
+            embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
+            view = ControlsView()
+            await inter.followup.send(embed=embed, view=view)
+        else:
+            await inter.followup.send("Song added to the queue.")
+    else:
+        if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
+            await play_song(inter, info)
+            embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
+            view = ControlsView()
+            await inter.followup.send(embed=embed, view=view)
+        else:
+            await show_queue(inter.guild.id, inter.channel)  # Show the updated queue
+
+
+async def show_queue(guild_id, channel):
+    queue = queues[guild_id]
+    if not queue.is_empty():
+        song_list = [f"{song['title']} - {format_duration(song['duration'])}" for song in queue.get_all()]
+        await channel.send("Current Queue:\n" + "\n".join(song_list))
+    else:
+        await channel.send("The queue is empty.")
+
+
 def format_duration(duration):
-    total_seconds = int(duration)
-    minutes = total_seconds // 60
-    seconds = total_seconds % 60
+    minutes = duration // 60
+    seconds = duration % 60
     return f"{minutes:02d}:{seconds:02d}"
+
+
 
 @bot.slash_command(name="replay", description="Replay the last song")
 async def _replay(inter):
@@ -333,7 +454,6 @@ async def _play(inter: disnake.CommandInteraction, song_url: str):
     if not inter.guild.voice_client.is_playing():
         await play_next_song(inter)
 
-
 async def play_next_song(inter):
     # Check if there are any songs in the queue
     if not queues[inter.guild.id].is_empty():
@@ -343,14 +463,14 @@ async def play_next_song(inter):
         # Play the song
         await play_song(inter, next_song)
 
-        # Create the "Now Playing" message
-        embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
-        embed.add_field(name="Title", value=next_song.title, inline=False)
-        embed.add_field(name="Duration", value=next_song.duration, inline=False)
-        embed.set_thumbnail(url=next_song.thumbnail)
-        embed.set_footer(text=f"Requested by: {next_song.requested_by}")
-        row = PlayerControls()
-        await inter.followup.send(embed=embed, components=[row])
+    embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
+    embed.add_field(name="Title", value=next_song['title'], inline=False)
+    embed.add_field(name="Duration", value=next_song['duration'], inline=False)
+    embed.set_thumbnail(url=next_song.get('thumbnail', 'default_thumbnail_url'))
+    embed.set_footer(text=f"Requested by: {next_song['requested_by']}")
+    view = ControlsView()
+    await inter.followup.send(embed=embed, view=view)
+
 
 # ...
 
@@ -373,103 +493,115 @@ async def get_youtube_song(inter, search_query, add_to_queue=True):
         await inter.send("Error: Unable to fetch the song URL.")
         return
 
-    queues[inter.guild.id].add(info)
-
     if add_to_queue:
-        # If adding to queue, just send the "Added to Queue" message
-        embed = disnake.Embed(title="Added to Queue", color=disnake.Color.green())
-        await inter.followup.send(embed=embed)
-    else:
-        # If not adding to queue, start playing immediately only if a song is not currently playing
+        queues[inter.guild.id].add(info)
         if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
             await play_song(inter, info)
-            embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
-            row = PlayerControls()
-            await inter.followup.send(embed=embed, components=[row])
+    else:
+        if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
+            await play_song(inter, info)
+        else:
+            await show_queue(inter.guild.id, inter.channel)  # Show the updated queue
 
-# ...
 
 def format_duration(duration):
     minutes = duration // 60
     seconds = duration % 60
     return f"{minutes:02d}:{seconds:02d}"
 
-async def show_queue(guild_id, channel):
+@bot.slash_command(name="show_queue", description="Show the current song queue")
+async def _show_queue(inter, page_number: int = 1):
+    guild_id = inter.guild.id
     if guild_id in queues and queues[guild_id].size() > 0:
         queue = queues[guild_id]
-        queue_list = [f"{i + 1}. {song['title']} - Duration: {song['duration']}" for i, song in enumerate(queue.queue)]
-        queue_text = "\n".join(queue_list)
+        queue_items = [song['title'] for song in queue.queue]
+
+        page_size = 10
+        page_count = (len(queue_items) + page_size - 1) // page_size  # Calculate total number of pages
+        
+        if page_number < 1 or page_number > page_count:
+            await inter.response.send_message("Invalid page number.")
+            return
+
+        start_index = (page_number - 1) * page_size
+        end_index = start_index + page_size
+        queue_items_page = queue_items[start_index:end_index]
+
+        queue_text = "\n".join([f"`{start_index + i + 1}.` {song}" for i, song in enumerate(queue_items_page)])
+
         embed = disnake.Embed(
             title="Music Queue",
             description=queue_text,
             color=disnake.Color.blue()
         )
-        await channel.send(embed=embed)
+        embed.set_footer(text=f"Page {page_number}/{page_count} | Songs {start_index + 1}-{end_index}/{len(queue_items)} | Requested by: {inter.user.display_name}")
+
+
+        await inter.response.send_message(embed=embed)
     else:
-        await channel.send("The music queue is currently empty.")
+        await inter.response.send_message("The music queue is currently empty.")
+
+def get_readable_song_name(song_name):
+    # Remove special characters and capitalize the first letter of each word
+    cleaned_name = ' '.join(word.capitalize() for word in re.findall(r'\w+', song_name))
+    
+    # Remove unwanted words
+    unwanted_words = ['video', 'full', 'song']
+    cleaned_name = ' '.join(word for word in cleaned_name.split() if word.lower() not in unwanted_words)
+    
+    return cleaned_name
 
 
-# Slash command to pause the currently playing song
-@bot.slash_command(name="pause", description="Pause the currently playing song")
-async def _pause(inter):
-    voice_client = inter.guild.voice_client
-    if voice_client.is_playing():
-        paused_songs[inter.guild.id] = voice_client.source
-        voice_client.pause()
-        await inter.response.send_message("Paused the song.")
+@bot.slash_command(name="back", description="Play the previous song")
+async def _back(inter):
+    guild_id = inter.guild.id
+    if guild_id in queues:
+        queue = queues[guild_id]
+        if not queue.is_empty():
+            queue.play_previous_song()
+            await inter.response.send_message("Playing the previous song.")
+        else:
+            await inter.response.send_message("The song queue is empty.")
     else:
-        await inter.response.send_message("Nothing is playing to pause.")
+        await inter.response.send_message("The song queue is empty.")
 
-# Slash command to resume the paused song
-@bot.slash_command(name="resume", description="Resume the paused song")
-async def _resume(inter):
-    voice_client = inter.guild.voice_client
-    if inter.guild.id in paused_songs:
-        voice_client.play(paused_songs[inter.guild.id])
-        del paused_songs[inter.guild.id]
-        await inter.response.send_message("Resumed the song.")
-    else:
-        await inter.response.send_message("No song is paused to resume.")
-
-# Slash command to stop the currently playing song
-@bot.slash_command(name="stop", description="Stop the currently playing song")
-async def _stop(inter):
-    voice_client = inter.guild.voice_client
-    if voice_client.is_playing() or voice_client.is_paused():
-        if inter.guild.id in paused_songs:
-            del paused_songs[inter.guild.id]
-        voice_client.stop()
-        await inter.response.send_message("Stopped the song.")
-    else:
-        await inter.response.send_message("Nothing is playing to stop.")
-
-# Slash command to skip to the next song in the queue
-@bot.slash_command(name="next", description="Skip to the next song in the queue")
+@bot.slash_command(name="next", description="Play the next song")
 async def _next(inter):
-    await play_next(inter)
-
-# Slash command to show the current song queue
-@bot.slash_command(name="queue", description="Show the current song queue")
-async def _queue(inter, page: int = 1):
-    if inter.guild.id in queues and len(queues[inter.guild.id]) > 0:
-        max_page = math.ceil(len(queues[inter.guild.id]) / 10)
-        page = max(1, min(page, max_page))
-        start = (page - 1) * 10
-        end = start + 10
-
-        embed = disnake.Embed(title="Song Queue", color=disnake.Color.blue())
-        for idx, song in enumerate(queues[inter.guild.id].queue[start:end], start=start+1):
-            title = song['title']
-            if len(title) > 50:
-                title = title[:50] + "..."
-            embed.add_field(name=f"Song {idx}", value=title, inline=False)
-        embed.set_footer(text=f"Page {page} of {max_page}")
-
-        control_view = QueueControl(page, max_page)
-        await inter.response.send_message(embed=embed, view=control_view)
+    guild_id = inter.guild.id
+    if guild_id in queues:
+        queue = queues[guild_id]
+        if not queue.is_empty():
+            queue.play_next_song()
+            await inter.response.send_message("Playing the next song.")
+        else:
+            await inter.response.send_message("The song queue is empty.")
     else:
-        await inter.response.send_message("The song queue is currently empty.")
+        await inter.response.send_message("The song queue is empty.")
 
+@bot.slash_command(name="repeat", description="Repeat the currently playing song")
+async def _repeat(inter):
+    guild_id = inter.guild.id
+    if guild_id in currently_playing:
+        song = currently_playing[guild_id]
+        await play_song(inter, song)
+        await inter.response.send_message("Repeating the currently playing song.")
+    else:
+        await inter.response.send_message("No song is currently playing.")
+
+
+@bot.slash_command(name="play_pause", description="Pause or resume the currently playing song")
+async def _play_pause(inter):
+    guild_id = inter.guild.id
+    if guild_id in currently_playing:
+        voice_client = inter.guild.voice_client
+        if voice_client.is_playing():
+            voice_client.pause()
+            await inter.response.send_message("Paused the song.")
+        else:
+            voice_client.resume()
+            await inter.response.send_message("Resumed the song.")
+    else:
+        await inter.response.send_message("No song is currently playing.")
 class Song:
     def __init__(self, song_id, title, youtube_url, thumbnail, duration, requested_by):
         self.song_id = song_id
@@ -488,12 +620,6 @@ async def add_to_queue(inter, song_info):
         queues[guild_id] = Queue()
 
     queues[guild_id].enqueue(song)
-
-    if queues[guild_id].size() > 1:
-        await inter.followup.send(f"Added to queue: {song.title}")
-    else:
-        await play_song(inter, song_info)
-        await inter.followup.send(f"Now playing: {song.title}")
 
 @bot.event
 async def on_button_click(inter):
@@ -515,6 +641,9 @@ async def on_button_click(inter):
     elif custom_id == "stop":
         inter.guild.voice_client.stop()
         await inter.message.edit(content="Stopped the song.")
+
+        bot.add_listener(on_button_click)
+                   
     elif custom_id == "send_dm":
         if inter.guild.id in currently_playing:
             song = currently_playing[inter.guild.id]
@@ -537,19 +666,13 @@ async def on_button_click(inter):
         # Send a response message indicating the chat has been cleared
         await inter.edit_origin(content="Chat cleared and bot disconnected.")
 
-
-class QueueControl(ui.View):
-    def __init__(self, page, max_page):
-        super().__init__(timeout=None)
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.blurple, emoji="◀️", custom_id="queue_back", disabled=page==1))
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.blurple, emoji="▶️", custom_id="queue_next", disabled=page==max_page))
-
-    async def on_timeout(self):
+async def on_timeout(self):
         # Remove the view after timeout
         for child in self.children:
             child.disabled = True
         await asyncio.sleep(5)  # Wait for 5 seconds
         self.stop()
+
 # |----------------------------------------------------------------------------------------------|
 #other shit
 
@@ -560,6 +683,7 @@ async def on_ready():
     funny_status = "/help | Report any Issues to @daddylad"
     truncated_status = (funny_status[:46] + "...") if len(funny_status) > 49 else funny_status
     await bot.change_presence(activity=disnake.Activity(type=disnake.ActivityType.listening, name=truncated_status))
+    check_for_free_games.start()
 
 
 # Function to get the command signature for a given command
@@ -880,7 +1004,7 @@ async def serverstats(ctx: disnake.ApplicationCommandInteraction):
     await ctx.send(embed=embed)
 
 
-# Role Reactions 
+# Role Reactions
 class RoleView(ui.View):
     def __init__(self, roles, emojis):
         super().__init__(timeout=None)
@@ -892,7 +1016,7 @@ class RoleView(ui.View):
         ])
         self.add_item(self.dropdown)
 
-    async def interaction_check(self, interaction: MessageInteraction) -> bool:
+    async def interaction_check(self, interaction: disnake.MessageInteraction) -> bool:
         role_id = int(interaction.data['values'][0])
         role = self.roles[role_id]
         member = interaction.user
@@ -901,8 +1025,8 @@ class RoleView(ui.View):
             await member.remove_roles(role)
             await interaction.response.send_message(f"Removed {role.name} from {member.mention}", ephemeral=True)
         else:
-          await member.add_roles(role)
-          await interaction.response.send_message(f"Added {role.name} to {member.mention}", ephemeral=True)
+            await member.add_roles(role)
+            await interaction.response.send_message(f"Added {role.name} to {member.mention}", ephemeral=True)
 
         return True
 
@@ -932,6 +1056,7 @@ async def setup_role(ctx):
     global setup_step
     setup_step = "title"
     await ctx.send("Please enter the title for the message:")
+
 
 @bot.event
 async def on_message(message):
@@ -983,7 +1108,7 @@ async def on_message(message):
             }
             setup_channel = await message.guild.create_text_channel(message.content, overwrites=overwrites)
         setup_step = None
-        await clear_messages(message.channel)  # Clear messages in channel
+        await clear_channel_messages(message.channel)  # Clear messages in channel
         embed = disnake.Embed(title=setup_title, description=setup_description, color=setup_color)
         message_sent = await setup_channel.send(embed=embed)
         if setup_include_roles:
@@ -997,15 +1122,15 @@ async def on_message(message):
         setup_step = None
         print(f"Roles: {setup_roles}")  # Debug: print roles
         print(f"Emojis: {setup_emojis}")  # Debug: print emojis
-        await clear_messages(message.channel)  # Clear messages in channel
+        await clear_channel_messages(message.channel)  # Clear messages in channel
         embed = disnake.Embed(title=setup_title, description=setup_description, color=setup_color)
         message_sent = await message.channel.send(embed=embed)
-    if setup_include_roles:
-        for emoji in setup_emojis:
-            await message_sent.add_reaction(emoji)
-    else:
-        for emoji in setup_emojis:
-            await message_sent.add_reaction(emoji)  # Add reactions even if there's no roles associated
+        if setup_include_roles:
+            for emoji in setup_emojis:
+                await message_sent.add_reaction(emoji)
+        else:
+            for emoji in setup_emojis:
+                await message_sent.add_reaction(emoji)  # Add reactions even if there's no roles associated
 
 
 async def clear_channel_messages(channel):
@@ -1014,6 +1139,7 @@ async def clear_channel_messages(channel):
             await message.delete()
         except:
             pass
+
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -1028,7 +1154,6 @@ async def on_raw_reaction_add(payload):
                 await payload.member.remove_roles(role)  # Remove role if member already has it
             else:
                 await payload.member.add_roles(role)  # Add role if member doesn't have it
-
 
 
 @bot.event
@@ -1048,11 +1173,21 @@ async def on_raw_reaction_remove(payload):
         if role in member.roles:
             await member.remove_roles(role)
 
-if bot.get_command("play"):
-    bot.remove_command("play")
-    bot.load_extension('bot.cogs.music')
 
+#Random commands that are use full
 
+@bot.slash_command(name="avatar", description="Get a user's avatar", 
+                   options=[Option("user", "The user to get the avatar of", type=6, required=False)])
+async def avatar(ctx, user: disnake.User = None):
+    if user is None:  # if no member is mentioned
+        user = ctx.author  # set member as the author
+
+    embed = disnake.Embed(
+        title = f"{user.name}'s avatar",
+        color = disnake.Color.blue()
+    )
+    embed.set_image(url=user.display_avatar.url)
+    await ctx.send(embed=embed)
 
 @bot.slash_command()
 async def set_patch_notes_channel(ctx, channel: disnake.TextChannel):
@@ -1088,11 +1223,103 @@ async def check_patch_notes(ctx):
     else:
         await ctx.send("Couldn't find the latest patch.")
 
+api = EpicGamesStoreAPI()
+FREE_GAMES_CHANNEL = None
 
+@tasks.loop(minutes=5)
+async def check_for_free_games():
+    global FREE_GAMES_CHANNEL
+    if FREE_GAMES_CHANNEL is None:
+        return
 
+    free_games_promotions = api.get_free_games()
+    free_games = []
+    for game in free_games_promotions['data']['Catalog']['searchStore']['elements']:
+        if game['promotions'] and game['promotions']['promotionalOffers']:
+            free_games.append(game)
+            title = game['title']
+            url = f"https://www.epicgames.com/store/en-US/p/{game['productSlug']}"
+            image_url = game['keyImages'][0]['url']
+            original_price = game['price']['totalPrice']['fmtPrice']['originalPrice']
+            price = game['price']['totalPrice']['fmtPrice']['discountPrice']
+            game_info = {
+                'title': title,
+                'url': url,
+                'image_url': image_url,
+                'original_price': original_price,
+                'price': price if price != '0' else 'Free',  # set price to 'Free' if the discount price is '0'
+                'platform': 'PC',
+                'store': 'Epic Games Store',
+            }
 
-def setup(bot):
-    bot.add_cog(Music(bot))
+            embed = disnake.Embed(title=game_info['title'], url=game_info['url'])
+            embed.set_image(url=game_info['image_url'])
+            embed.add_field(name='Store', value=game_info['store'], inline=True)
+            embed.add_field(name='Platform', value=game_info['platform'], inline=True)
+            original_price_with_strike = f'~~{game_info["original_price"]}~~'
+            price = f'{original_price_with_strike} - {game_info["price"]}'  # Add strikethrough to original price
+            embed.add_field(name='Price', value=price, inline=False)
+
+            await FREE_GAMES_CHANNEL.send(embed=embed)
+
+@bot.slash_command(
+    name='setup',
+    description='Set up the channel for free games notifications',
+    options=[
+        disnake.Option(
+            name='channel',
+            description='The channel to receive free games notifications',
+            type=disnake.OptionType.channel,
+            required=True
+        )
+    ]
+)
+async def setup(ctx, channel: disnake.TextChannel):
+    global FREE_GAMES_CHANNEL
+    FREE_GAMES_CHANNEL = channel
+    await ctx.send(f'Set up the free games notifications channel to {channel.mention}.')
+
+@bot.slash_command(
+    name='freegames',
+    description='Fetch and display free games'
+)
+async def freegames(ctx):
+    global FREE_GAMES_CHANNEL
+    if FREE_GAMES_CHANNEL is None:
+        await ctx.send('The free games channel has not been set up. Please run the /setup command to set up the channel.')
+        return
+
+    free_games_promotions = api.get_free_games()
+    free_games = []
+    for game in free_games_promotions['data']['Catalog']['searchStore']['elements']:
+        if game['promotions'] and game['promotions']['promotionalOffers']:
+            free_games.append(game)
+            title = game['title']
+            url = f"https://www.epicgames.com/store/en-US/p/{game['productSlug']}"
+            image_url = game['keyImages'][0]['url']
+            original_price = game['price']['totalPrice']['fmtPrice']['originalPrice']
+            price = game['price']['totalPrice']['fmtPrice']['discountPrice']
+            game_info = {
+                'title': title,
+                'url': url,
+                'image_url': image_url,
+                'original_price': original_price,
+                'price': price if price != '0' else 'Free',  # set price to 'Free' if the discount price is '0'
+                'platform': 'PC',
+                'store': 'Epic Games Store',
+            }
+
+            embed = disnake.Embed(title=game_info['title'], url=game_info['url'])
+            embed.set_image(url=game_info['image_url'])
+            embed.add_field(name='Store', value=game_info['store'], inline=True)
+            embed.add_field(name='Platform', value=game_info['platform'], inline=True)
+            original_price_with_strike = f'~~{game_info["original_price"]}~~'
+            price = f'{original_price_with_strike} - {game_info["price"]}'  # Add strikethrough to original price
+            embed.add_field(name='Price', value=price, inline=False)
+
+            await FREE_GAMES_CHANNEL.send(embed=embed)
+    else:
+        await ctx.send("No free games available.")
 
 # Run the bot
 bot.run(TOKEN)
