@@ -40,6 +40,7 @@ queues = {}
 playerconrols = {}
 paused_songs = {}
 page_data = {}
+
 # Set up Spotify API credentials
 spotify_credentials = SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
 spotify = spotipy.Spotify(client_credentials_manager=spotify_credentials)
@@ -269,7 +270,7 @@ async def play_song(ctx, info):
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     }
 
-    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='usr/bin/ffmpeg')
+    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='/usr/bin/ffmpeg')
     volume_transformer = disnake.PCMVolumeTransformer(source)
     
     # After the current song ends, it will play the next song in the queue.
@@ -1226,6 +1227,8 @@ async def check_patch_notes(ctx):
 api = EpicGamesStoreAPI()
 FREE_GAMES_CHANNEL = None
 
+sent_free_games = set()
+
 @tasks.loop(minutes=5)
 async def check_for_free_games():
     global FREE_GAMES_CHANNEL
@@ -1238,6 +1241,9 @@ async def check_for_free_games():
         if game['promotions'] and game['promotions']['promotionalOffers']:
             free_games.append(game)
             title = game['title']
+            if title in sent_free_games:
+                continue
+            sent_free_games.add(title)
             url = f"https://www.epicgames.com/store/en-US/p/{game['productSlug']}"
             image_url = game['keyImages'][0]['url']
             original_price = game['price']['totalPrice']['fmtPrice']['originalPrice']
