@@ -30,7 +30,7 @@ import os
 from disnake import Option
 from discord.ext import tasks
 from bot.utils.colors import color_map
-
+from disnake.app_commands import OptionType
 
 
 
@@ -70,7 +70,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
             ytdl.params['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',
+                'preferredquality': '320',
             }]
 
         loop = loop or asyncio.get_event_loop()
@@ -168,7 +168,7 @@ class PlayerControls(disnake.ui.View):
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏯️", custom_id="play_pause"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏭️", custom_id="skip"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="💌", custom_id="send_dm"))
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🗑️", custom_id="clear"))  # Clear button
+        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🗑️", custom_id="clear_chat"))  # Clear button
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="📑", custom_id="show_queue"))
 class VolumeControl(ui.View):
     def __init__(self):
@@ -702,6 +702,39 @@ async def _skip(inter):
 
 
 
+@bot.slash_command(name="player", description="Manage the music player")
+async def _player(ctx):
+    guild_id = ctx.guild.id
+
+    if guild_id in currently_playing:
+        song = currently_playing[guild_id]
+        embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
+        embed.add_field(name="Title", value=f"[{song.title}]({song.youtube_url})", inline=False)
+        embed.add_field(name="Duration", value=song.duration, inline=False)
+        embed.set_thumbnail(url=song.thumbnail)
+        embed.set_footer(text=f"Requested by: {song.requested_by}")
+    else:
+        embed = disnake.Embed(title="Music Player", description="No song is currently playing.", color=disnake.Color.blue())
+
+    view = PlayerControls()
+
+    if ctx.data.name == "clear":
+        # Clear chat and disconnect functionality
+        channel = ctx.channel
+
+        # Delete all messages in the channel
+        await channel.purge()
+
+        # Disconnect the bot from the voice channel (if connected)
+        voice_client = get(bot.voice_clients, guild=ctx.guild)
+        if voice_client and voice_client.is_connected():
+            await voice_client.disconnect()
+
+        # Send a response message indicating the chat has been cleared
+        embed = disnake.Embed(title="Music Player", description="Chat cleared and bot disconnected.", color=disnake.Color.blue())
+        await ctx.send(embed=embed, view=view)
+    else:
+        await ctx.send(embed=embed, view=view)
 @bot.event
 async def on_button_click(inter):
     custom_id = inter.data.custom_id
@@ -713,11 +746,11 @@ async def on_button_click(inter):
             if not queue.is_empty():
                 # Set the skip request flag
                 skip_request[guild_id] = True
-                
+
                 # Stop the current song
                 voice_client = inter.guild.voice_client
                 voice_client.stop()
-                
+
                 print(f'Skipping song. Queue: {list(queue._queue)}')  # Debug print statement
 
                 await inter.send("Skipping to the next song.")
@@ -746,6 +779,20 @@ async def on_button_click(inter):
             await inter.user.send(message)
         else:
             await inter.message.edit(content="No song has been played yet.")
+    elif custom_id == "clear_chat":
+        channel = inter.channel
+
+        # Delete all messages in the channel
+        await channel.purge()
+
+        # Check if the bot is connected to a voice channel
+        voice_client = get(bot.voice_clients, guild=inter.guild)
+        if voice_client and voice_client.is_connected():
+            # Disconnect the bot
+            await voice_client.disconnect()
+
+        # Send a response message indicating the chat has been cleared
+        await inter.send("Chat cleared and bot disconnected.")
 
     elif custom_id == "show_queue":
         guild_id = inter.guild.id
@@ -778,21 +825,6 @@ async def on_button_click(inter):
                 await inter.send("The song queue is empty.")
         else:
             await inter.send("The song queue is empty.")
-
-    elif custom_id == "clear":
-        # Clear chat and disconnect functionality
-        channel = inter.channel
-
-        # Delete all messages in the channel
-        await channel.purge()
-
-        # Disconnect the bot from the voice channel (if connected)
-        voice_client = get(bot.voice_clients, guild=inter.guild)
-        if voice_client and voice_client.is_connected():
-            await voice_client.disconnect()
-
-        # Send a response message indicating the chat has been cleared
-        await inter.edit_origin(content="Chat cleared and bot disconnected.")
 
 async def on_timeout(self):
         # Remove the view after timeout
@@ -979,18 +1011,11 @@ async def clear_chat(inter):
     # Check if the bot is connected to a voice channel
     voice_client = get(bot.voice_clients, guild=inter.guild)
     if voice_client and voice_client.is_connected():
-        # Check if the user who triggered the command is in a voice channel
-        voice_state = inter.author.voice
-        if voice_state and voice_state.channel:
-            # Disconnect the bot only if the user is not in the same voice channel
-            if voice_state.channel != voice_client.channel:
-                await voice_client.disconnect()
+        # Disconnect the bot
+        await voice_client.disconnect()
 
     # Send a response message indicating the chat has been cleared
-    await inter.edit_original_message(content="Chat cleared and bot disconnected.", ephemeral=True)
-
-
-
+    await inter.edit_original_message(content="Chat cleared and bot disconnected.")
 
 # Server stats
 server_stats_settings = {}
@@ -1267,6 +1292,23 @@ async def on_raw_reaction_remove(payload):
 
 #Random commands that are use full
 
+
+@bot.slash_command(description='Show color information.', options=[
+    disnake.Option(name='color_name', description='Enter a color name', type=OptionType.string, required=True)
+])
+async def color(inter: disnake.ApplicationCommandInteraction, color_name: str):
+    color_name = color_name.lower()
+    if color_name not in color_map:
+        await inter.response.send_message("Please provide a valid color name.")
+        return
+
+    color_hex_value = color_map[color_name]
+    color_embed = disnake.Embed(title=f"Color: {color_name.capitalize()}", 
+                                description=f"HEX: #{color_hex_value:06X}\nRGB: ({color_hex_value>>16}, {(color_hex_value>>8)&0xFF}, {color_hex_value&0xFF})",
+                                color=color_hex_value)
+    await inter.response.send_message(embed=color_embed)
+
+
 @bot.slash_command(name="avatar", description="Get a user's avatar", 
                    options=[Option("user", "The user to get the avatar of", type=6, required=False)])
 async def avatar(ctx, user: disnake.User = None):
@@ -1280,6 +1322,78 @@ async def avatar(ctx, user: disnake.User = None):
     embed.set_image(url=user.display_avatar.url)
     await ctx.send(embed=embed)
 
+@bot.slash_command(description='Check user info and ban history')
+async def userinfo(ctx: disnake.ApplicationCommandInteraction, member: disnake.Member):
+    # Get user info
+    created_at = member.created_at.strftime('%Y-%m-%d %H:%M:%S')
+    joined_at = member.joined_at.strftime('%Y-%m-%d %H:%M:%S')
+    roles = ', '.join(role.name for role in member.roles if role != ctx.guild.default_role)
+    user_info = f'**Username:** {member.name}\n**ID:** {member.id}\n**Created at:** {created_at}\n**Joined at:** {joined_at}\n**Roles:** {roles or "None"}'
+    
+    # Get ban history
+    bans = await ctx.guild.bans().flatten()
+    ban_entry = [entry for entry in bans if entry.user.id == member.id]
+    
+    if ban_entry:
+        ban_info = f'**Banned at:** {ban_entry[0].created_at}\n**Reason:** {ban_entry[0].reason}'
+    else:
+        ban_info = 'No ban history found'
+    
+    # Create embed
+    embed = disnake.Embed(title=f'User Info for {member.name}', color=disnake.Color.blue())
+    embed.set_thumbnail(url=member.avatar.url)
+    embed.add_field(name='User Info', value=user_info, inline=False)
+    embed.add_field(name='Ban History', value=ban_info, inline=False)
+    embed.set_footer(text=f'Requested by {ctx.author.name}')
+    
+    await ctx.response.send_message(embed=embed)
+
+#Ban command 
+@bot.slash_command(description='Ban a user from the server.')
+@commands.has_permissions(administrator=True)
+async def ban(self, inter: disnake.ApplicationCommandInteraction, user: disnake.Member, reason: str = "No reason provided."):
+    await user.ban(reason=reason)
+    await inter.response.send_message(f'{user.name} has been banned from the server. Reason: {reason}')
+
+#kick command 
+@bot.slash_command(description='Kick a user from the server.')
+@commands.has_permissions(administrator=True)
+async def kick(self, inter: disnake.ApplicationCommandInteraction, user: disnake.Member, reason: str = "No reason provided."):
+    await user.kick(reason=reason)
+    await inter.response.send_message(f'{user.name} has been kicked from the server. Reason: {reason}')
+#Mute command 
+@bot.slash_command(description='Mute a user in the server.')
+@commands.has_permissions(administrator=True)
+async def mute(self, inter: disnake.ApplicationCommandInteraction, user: disnake.Member, duration: str, reason: str = "No reason provided."):
+    # Mute the user by assigning the "Muted" role or applying necessary permission changes
+    # Adjust the implementation based on your bot's mute functionality
+
+    await inter.response.send_message(f'{user.name} has been muted for {duration}. Reason: {reason}')
+
+#Unmute 
+@bot.slash_command(description='Unmute a previously muted user.')
+@commands.has_permissions(administrator=True)
+async def unmute(self, inter: disnake.ApplicationCommandInteraction, user: disnake.Member):
+    # Unmute the user by removing the "Muted" role or reverting the necessary permission changes
+    # Adjust the implementation based on your bot's mute functionality
+
+    await inter.response.send_message(f'{user.name} has been unmuted.')
+#Manage Role
+@bot.slash_command(description='Manage roles within the server.')
+@commands.has_permissions(administrator=True)
+async def role(self, inter: disnake.ApplicationCommandInteraction, action: str, user: disnake.Member, role: disnake.Role):
+    if action == 'add':
+        await user.add_roles(role)
+        await inter.response.send_message(f'{user.name} has been given the role: {role.name}')
+    elif action == 'remove':
+        await user.remove_roles(role)
+        await inter.response.send_message(f'{user.name} no longer has the role: {role.name}')
+    else:
+        await inter.response.send_message('Invalid action. Please provide either "add" or "remove".')
+
+    
+
+#agem patch  
 @bot.slash_command()
 async def set_patch_notes_channel(ctx, channel: disnake.TextChannel):
     # Save the chosen channel in bot's storage
