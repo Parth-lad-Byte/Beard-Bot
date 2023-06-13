@@ -29,6 +29,9 @@ import googleapiclient.discovery
 import os
 from disnake import Option
 from discord.ext import tasks
+from bot.utils.colors import color_map
+
+
 
 
 user_preferences = {}
@@ -37,9 +40,11 @@ global currently_playing
 players = {}
 currently_playing = {}
 queues = {}
-playerconrols = {}
+playercontrols = {}
 paused_songs = {}
 page_data = {}
+skip_request = {}
+
 
 # Set up Spotify API credentials
 spotify_credentials = SpotifyClientCredentials(client_id=SPOTIPY_CLIENT_ID, client_secret=SPOTIPY_CLIENT_SECRET)
@@ -86,6 +91,7 @@ class Queue:
     def __init__(self):
         self._queue = deque()
         self.current_song = None
+        self.is_playing = False
 
     def add(self, item):
         self._queue.append(item)
@@ -103,15 +109,50 @@ class Queue:
     def is_empty(self):
         return not self._queue
 
-    async def play_next_song(self):
-        if self.is_empty():
-            await self.clear_queue()
-            return
+    async def play_next_song(self, bot, guild_id):
+        if not self.is_empty() and not self.is_playing:
+            self.is_playing = True
+            next_song = self.dequeue()
+            print(f'Playing next song: {next_song}')  # Debug print statement
+            self.current_song = next_song
 
-        next_song = self.dequeue()
-        source = await YTDLSource.create_source(self.bot, next_song['url'], loop=self.bot.loop, download=False)
-        self.current_song = next_song
-        self.voice_client.play(source, after=lambda _: asyncio.run_coroutine_threadsafe(self.play_next_song(), self.bot.loop))
+            voice_client = bot.voice_clients[guild_id]
+            source = await YTDLSource.create_source(bot, next_song['url'], loop=bot.loop, download=False)
+
+            async def after_playback(error, guild_id):
+                if error:
+                    print(f"Error in playback: {error}")
+
+                # Check if there was a skip request
+                if skip_request.get(guild_id):
+                    # Reset the skip request flag
+                    skip_request[guild_id] = False
+                    return
+
+                # Get the next song to play
+                queue = queues.get(guild_id)
+                if queue and not queue.is_empty():
+                    next_song = queue.dequeue()
+                    print(f'Playing next song: {next_song}')  # Debug print statement
+
+                    voice_client = bot.voice_clients[guild_id]
+                    source = await YTDLSource.create_source(bot, next_song['url'], loop=bot.loop, download=False)
+                    voice_client.play(source, after=lambda e: asyncio.create_task(after_playback(e, guild_id)))
+
+                    # Update the currently playing song
+                    queue.current_song = next_song
+                else:
+                    # No more songs in the queue
+                    currently_playing.pop(guild_id, None)
+                    playercontrols.pop(guild_id, None)
+                    if guild_id in players:
+                        players[guild_id].stop()
+                        del players[guild_id]
+                    queues.pop(guild_id, None)
+
+                    # Remove the currently playing song from the queue
+                    queue.current_song = None
+
 
     def size(self):
         return len(self._queue)
@@ -120,16 +161,15 @@ class Queue:
     def queue(self):
         return self._queue
 
+
 class PlayerControls(disnake.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏮️", custom_id="back"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏯️", custom_id="play_pause"))
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏭️", custom_id="next"))
-        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🔁", custom_id="replay"))
+        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="⏭️", custom_id="skip"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="💌", custom_id="send_dm"))
         self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="🗑️", custom_id="clear"))  # Clear button
-
+        self.add_item(disnake.ui.Button(style=disnake.ButtonStyle.red, emoji="📑", custom_id="show_queue"))
 class VolumeControl(ui.View):
     def __init__(self):
         super().__init__()
@@ -164,17 +204,59 @@ class VolumeButton(ui.Button):
             except disnake.errors.InteractionResponded:
                 pass
 
-# Initialize song queues for different servers
 class Music(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.queues = {}  # Initialize queues at the class level
 
     async def _play(self, inter, *, song):
+        guild_id = inter.guild.id
+
+        if guild_id not in self.queues:
+            self.queues[guild_id] = Queue(guild_id)
+
         if inter.guild.voice_client.is_playing():
             await get_youtube_song(inter, song, add_to_queue=True)  # Add to queue if a song is playing
         else:
             await get_youtube_song(inter, song, add_to_queue=False)  # Play immediately if no song is playing
+
+    async def play_next(self, inter):
+        guild_id = inter.guild.id
+        if guild_id in self.queues:
+            queue = self.queues[guild_id]
+            if not queue.is_empty():
+                bot_instance = inter.bot
+                await queue.play_next_song(bot_instance, guild_id)
+                return
+        currently_playing.pop(guild_id, None)
+        players[guild_id].stop()
+        del players[guild_id]
+        self.queues.pop(guild_id, None)
+
+    async def play_next_song(self, bot, guild_id):
+        if guild_id in self.queues:
+            queue = self.queues[guild_id]
+            if not queue.is_empty():
+                next_song = queue.dequeue()
+                queue.current_song = next_song
+
+                voice_client = bot.voice_clients[guild_id]
+                source = await YTDLSource.create_source(bot, next_song['url'], loop=bot.loop, download=False)
+                voice_client.play(source, after=lambda _: asyncio.ensure_future(asyncio.sleep(1), self.play_next_song(bot, guild_id)))
+
+                # Remove the currently playing song from the queue after starting to play the next song
+                queue.current_song = None
+            else:
+                currently_playing.pop(guild_id, None)
+                players[guild_id].stop()
+                del players[guild_id]
+                self.queues.pop(guild_id, None)
+        else:
+            currently_playing.pop(guild_id, None)
+            players[guild_id].stop()
+            del players[guild_id]
+            self.queues.pop(guild_id, None)
+
 
     @commands.command()
     async def join(self, ctx):
@@ -270,7 +352,7 @@ async def play_song(ctx, info):
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     }
 
-    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='/usr/bin/ffmpeg')
+    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='c:/ffmpeg/bin/ffmpeg.exe')
     volume_transformer = disnake.PCMVolumeTransformer(source)
     
     # After the current song ends, it will play the next song in the queue.
@@ -332,41 +414,37 @@ async def fetch_playlist_info(playlist_id):
 
 
 async def get_youtube_song(inter, search_query, add_to_queue=True):
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'default_search': 'ytsearch:',
-        'extractor_args': {
-            'youtube': {'noplaylist': True},
-            'soundcloud': {},
-        },
-    }
+    try:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'default_search': 'ytsearch:',
+            'extractor_args': {
+                'youtube': {'noplaylist': True},
+                'soundcloud': {},
+            },
+        }
 
-    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(search_query, download=False)
-        if 'entries' in info:
-            info = info['entries'][0]
+        with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+            if 'entries' in info:
+                info = info['entries'][0]
 
-    if info is None:
-        await inter.send("Error: Unable to fetch the song URL.")
-        return
+        if info is None:
+            await inter.send("Error: Unable to fetch the song URL.")
+            return
 
-    if add_to_queue:
-        queues[inter.guild.id].add(info)
-        if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
-            await play_song(inter, info)
-            embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
-            view = ControlsView()
-            await inter.followup.send(embed=embed, view=view)
+        if add_to_queue:
+            queues[inter.guild.id].add(info)
+            if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
+                await play_song(inter, info)
         else:
-            await inter.followup.send("Song added to the queue.")
-    else:
-        if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
-            await play_song(inter, info)
-            embed = disnake.Embed(title="Now Playing", color=disnake.Color.green())
-            view = ControlsView()
-            await inter.followup.send(embed=embed, view=view)
-        else:
-            await show_queue(inter.guild.id, inter.channel)  # Show the updated queue
+            if not inter.guild.voice_client.is_playing() and not inter.guild.voice_client.is_paused():
+                await play_song(inter, info)
+            else:
+                await show_queue(inter.guild.id, inter.channel)  # Show the updated queue
+
+    except Exception as e:
+        await inter.send(f"An error occurred while getting the song: {str(e)}")
 
 
 async def show_queue(guild_id, channel):
@@ -400,13 +478,23 @@ async def _replay(inter):
 
     await play_song(inter, song)
 
-# Function to play the next song in the queue
 async def play_next(inter):
     guild_id = inter.guild.id
     if guild_id in queues:
         queue = queues[guild_id]
         if not queue.is_empty():
-            queue.dequeue()
+            bot_instance = inter.bot
+            await queue.play_next_song(bot_instance, guild_id)
+            return
+    currently_playing.pop(guild_id, None)
+    playercontrols.pop(guild_id, None)
+    players[guild_id].stop()
+    del players[guild_id]
+    queues.pop(guild_id, None)
+
+
+
+
 
 @bot.slash_command(name="play_next", description="Skip to the next song in the queue")
 async def _play_next(inter):
@@ -420,11 +508,16 @@ async def _join(inter):
 
 @bot.slash_command(name="play", description="Play a song from YouTube or Spotify")
 async def _play(inter: disnake.CommandInteraction, song_url: str):
+    # Check if the user is in a voice channel
+    if not inter.author.voice or not inter.author.voice.channel:
+        await inter.response.send_message("You need to be in a voice channel to play a song.")
+        return
+
     await inter.response.defer()  # Defer the response
 
     # Do not clear the queue here; instead, add to it
-    #queues[inter.guild.id] = Queue()
-    #currently_playing.pop(inter.guild.id, None)
+    # queues[inter.guild.id] = Queue()
+    # currently_playing.pop(inter.guild.id, None)
 
     # Create the queue for the guild if it doesn't exist
     if inter.guild.id not in queues:
@@ -455,6 +548,7 @@ async def _play(inter: disnake.CommandInteraction, song_url: str):
     if not inter.guild.voice_client.is_playing():
         await play_next_song(inter)
 
+
 async def play_next_song(inter):
     # Check if there are any songs in the queue
     if not queues[inter.guild.id].is_empty():
@@ -471,7 +565,6 @@ async def play_next_song(inter):
     embed.set_footer(text=f"Requested by: {next_song['requested_by']}")
     view = ControlsView()
     await inter.followup.send(embed=embed, view=view)
-
 
 # ...
 
@@ -553,43 +646,6 @@ def get_readable_song_name(song_name):
     return cleaned_name
 
 
-@bot.slash_command(name="back", description="Play the previous song")
-async def _back(inter):
-    guild_id = inter.guild.id
-    if guild_id in queues:
-        queue = queues[guild_id]
-        if not queue.is_empty():
-            queue.play_previous_song()
-            await inter.response.send_message("Playing the previous song.")
-        else:
-            await inter.response.send_message("The song queue is empty.")
-    else:
-        await inter.response.send_message("The song queue is empty.")
-
-@bot.slash_command(name="next", description="Play the next song")
-async def _next(inter):
-    guild_id = inter.guild.id
-    if guild_id in queues:
-        queue = queues[guild_id]
-        if not queue.is_empty():
-            queue.play_next_song()
-            await inter.response.send_message("Playing the next song.")
-        else:
-            await inter.response.send_message("The song queue is empty.")
-    else:
-        await inter.response.send_message("The song queue is empty.")
-
-@bot.slash_command(name="repeat", description="Repeat the currently playing song")
-async def _repeat(inter):
-    guild_id = inter.guild.id
-    if guild_id in currently_playing:
-        song = currently_playing[guild_id]
-        await play_song(inter, song)
-        await inter.response.send_message("Repeating the currently playing song.")
-    else:
-        await inter.response.send_message("No song is currently playing.")
-
-
 @bot.slash_command(name="play_pause", description="Pause or resume the currently playing song")
 async def _play_pause(inter):
     guild_id = inter.guild.id
@@ -622,11 +678,55 @@ async def add_to_queue(inter, song_info):
 
     queues[guild_id].enqueue(song)
 
+@bot.slash_command(name="skip", description="Skip the currently playing song")
+async def _skip(inter):
+    guild_id = inter.guild.id
+    if guild_id in queues:
+        queue = queues[guild_id]
+        if not queue.is_empty():
+            # Set the skip request flag
+            skip_request[guild_id] = True
+            
+            # Stop the current song
+            voice_client = inter.guild.voice_client
+            voice_client.stop()
+            
+            print(f'Skipping song. Queue: {list(queue._queue)}')  # Debug print statement
+
+            await inter.send("Skipping to the next song.")
+        else:
+            await inter.send("The song queue is empty.")
+    else:
+        await inter.send("The song queue is empty.")
+
+
+
+
 @bot.event
 async def on_button_click(inter):
     custom_id = inter.data.custom_id
 
-    if custom_id == "play_pause":
+    if custom_id == "skip" or custom_id == "skip_command":
+        guild_id = inter.guild.id
+        if guild_id in queues:
+            queue = queues[guild_id]
+            if not queue.is_empty():
+                # Set the skip request flag
+                skip_request[guild_id] = True
+                
+                # Stop the current song
+                voice_client = inter.guild.voice_client
+                voice_client.stop()
+                
+                print(f'Skipping song. Queue: {list(queue._queue)}')  # Debug print statement
+
+                await inter.send("Skipping to the next song.")
+            else:
+                await inter.send("The song queue is empty.")
+        else:
+            await inter.send("The song queue is empty.")
+
+    elif custom_id == "play_pause":
         voice_client = inter.guild.voice_client
         if voice_client.is_playing():
             voice_client.pause()
@@ -634,17 +734,11 @@ async def on_button_click(inter):
         else:
             voice_client.resume()
             await inter.message.edit(content="Resumed the song.")
-    elif custom_id == "back":
-        await inter.message.edit(content="Back functionality not implemented yet.")
-    elif custom_id == "next":
-        await play_next(inter)
-        await inter.message.edit(content="Playing next song in the queue.")
+
     elif custom_id == "stop":
         inter.guild.voice_client.stop()
         await inter.message.edit(content="Stopped the song.")
 
-        bot.add_listener(on_button_click)
-                   
     elif custom_id == "send_dm":
         if inter.guild.id in currently_playing:
             song = currently_playing[inter.guild.id]
@@ -652,6 +746,39 @@ async def on_button_click(inter):
             await inter.user.send(message)
         else:
             await inter.message.edit(content="No song has been played yet.")
+
+    elif custom_id == "show_queue":
+        guild_id = inter.guild.id
+        if guild_id in queues:
+            queue = queues[guild_id]
+            if not queue.is_empty():
+                page_number = 1
+                page_size = 10
+                page_count = (queue.size() + page_size - 1) // page_size
+
+                if page_number < 1 or page_number > page_count:
+                    await inter.send("Invalid page number.")
+                    return
+
+                start_index = (page_number - 1) * page_size
+                end_index = start_index + page_size
+                queue_items_page = list(queue._queue)[start_index:end_index]
+
+                queue_text = "\n".join([f"{start_index + i + 1}. {song.title}" if not isinstance(song, dict) else f"{start_index + i + 1}. {song['title']}" for i, song in enumerate(queue_items_page)])
+
+                embed = disnake.Embed(
+                    title="Music Queue",
+                    description=queue_text,
+                    color=disnake.Color.blue()
+                )
+                embed.set_footer(text=f"Page {page_number}/{page_count} | Songs {start_index + 1}-{end_index}/{queue.size()} | Requested by: {inter.user.display_name}")
+
+                await inter.send(embed=embed)
+            else:
+                await inter.send("The song queue is empty.")
+        else:
+            await inter.send("The song queue is empty.")
+
     elif custom_id == "clear":
         # Clear chat and disconnect functionality
         channel = inter.channel
@@ -1004,135 +1131,87 @@ async def serverstats(ctx: disnake.ApplicationCommandInteraction):
 
     await ctx.send(embed=embed)
 
-
-# Role Reactions
-class RoleView(ui.View):
-    def __init__(self, roles, emojis):
-        super().__init__(timeout=None)
-        self.roles = roles
-        self.emojis = emojis
-        self.dropdown = ui.Select(placeholder="Select a role...", options=[
-            ui.SelectOption(label=emoji, description=role.name, value=str(idx))
-            for idx, (role, emoji) in enumerate(zip(roles, emojis))
-        ])
-        self.add_item(self.dropdown)
-
-    async def interaction_check(self, interaction: disnake.MessageInteraction) -> bool:
-        role_id = int(interaction.data['values'][0])
-        role = self.roles[role_id]
-        member = interaction.user
-
-        if role in member.roles:
-            await member.remove_roles(role)
-            await interaction.response.send_message(f"Removed {role.name} from {member.mention}", ephemeral=True)
-        else:
-            await member.add_roles(role)
-            await interaction.response.send_message(f"Added {role.name} to {member.mention}", ephemeral=True)
-
-        return True
-
-
-    async def assign_role(self, interaction, role):
-        member = interaction.user
-        if role in member.roles:
-            await member.remove_roles(role)
-            await interaction.response.send_message(f"Removed {role.name} from {member.mention}", ephemeral=True)
-        else:
-            await member.add_roles(role)
-            await interaction.response.send_message(f"Added {role.name} to {member.mention}", ephemeral=True)
-
-
-setup_step = None
-setup_title = ""
-setup_description = ""
-setup_roles = []
-setup_emojis = []
-setup_include_roles = False
-setup_color = 0
-
+setups = {}
 
 @bot.slash_command(name="setup_role", description="Begin setting up a custom message")
 @commands.has_guild_permissions(administrator=True)
 async def setup_role(ctx):
-    global setup_step
-    setup_step = "title"
+    if ctx.guild.id not in setups:
+        setups[ctx.guild.id] = []
+    setups[ctx.guild.id].append({
+        "step": "title",
+        "title": "",
+        "description": "",
+        "roles": [],
+        "emojis": [],
+        "message_id": None,
+        "include_roles": False,
+        "color": ""
+    })
     await ctx.send("Please enter the title for the message:")
-
 
 @bot.event
 async def on_message(message):
-    global setup_step, setup_title, setup_description, setup_roles, setup_include_roles, setup_color, setup_emojis
-    
-    # Ignore bot's own messages
-    if message.author == bot.user:
+    if message.author == bot.user or message.guild.id not in setups:
         return
 
-    if setup_step == "title":
-        setup_title = message.content
-        setup_step = "description"
+    setup = setups[message.guild.id][-1]
+
+    if setup["step"] == "title":
+        setup["title"] = message.content
+        setup["step"] = "description"
         await message.channel.send("Please enter the description for the message:")
-    elif setup_step == "description":
-        setup_description = message.content
-        setup_step = "color"
-        await message.channel.send("Please enter the color for the embed (in hex format, e.g. #123456):")
-    elif setup_step == "color":
-        setup_color = int(message.content.replace("#", ""), 16)  # Convert hex color to integer
-        setup_step = "roles"
+    elif setup["step"] == "description":
+        setup["description"] = message.content
+        setup["step"] = "color"
+        await message.channel.send("Please enter the color name for the embed:")
+    elif setup["step"] == "color":
+        setup["color"] = message.content.lower()
+        setup["step"] = "roles"
         await message.channel.send("Do you want to include role reactions? (yes/no):")
-    elif setup_step == "roles":
+    elif setup["step"] == "roles":
         if message.content.lower() == "yes":
-            setup_include_roles = True
-            setup_step = "role_list"
+            setup["include_roles"] = True
+            setup["step"] = "role_list"
             await message.channel.send("Please mention the roles for the role message (separated by spaces):")
         else:
-            setup_include_roles = False
-            setup_step = "channel"  # If no role reactions, ask for the channel to send the message to
+            setup["include_roles"] = False
+            setup["step"] = "channel"
             await message.channel.send("Please mention the channel where you want to post the message, or provide a name for a new channel:")
-    elif setup_step == "role_list":
-        # Get the order of role mentions in the message content
+    elif setup["step"] == "role_list":
         role_order = [int(role_id) for role_id in re.findall(r'<@&(\d+)>', message.content)]
-        # Sort role_mentions based on their order in the message content
-        setup_roles = sorted(message.role_mentions, key=lambda r: role_order.index(r.id))
-        setup_step = "emoji_list"
+        setup["roles"] = sorted(message.role_mentions, key=lambda r: role_order.index(r.id))
+        setup["step"] = "emoji_list"
         await message.channel.send("Please enter the emojis for each role (separated by spaces, in the same order as the roles):")
-    elif setup_step == "emoji_list":
-        setup_emojis = message.content.split()  # Split by whitespace to get each emoji
-        setup_step = "channel"
+    elif setup["step"] == "emoji_list":
+        setup["emojis"] = message.content.split()
+        setup["step"] = "channel"
         await message.channel.send("Please mention the channel where you want to post the message, or provide a name for a new channel:")
-    elif setup_step == "channel":
-        if message.channel_mentions:  # If there's a channel mention in the message
-            setup_channel = message.channel_mentions[0]  # Use the first mentioned channel
-        else:  # If there's no channel mention, create a new channel
+    elif setup["step"] == "channel":
+        if message.channel_mentions:
+            setup_channel = message.channel_mentions[0]
+        else:
             overwrites = {
                 message.guild.default_role: disnake.PermissionOverwrite(read_messages=False),
                 message.guild.me: disnake.PermissionOverwrite(read_messages=True)
             }
             setup_channel = await message.guild.create_text_channel(message.content, overwrites=overwrites)
-        setup_step = None
-        await clear_channel_messages(message.channel)  # Clear messages in channel
-        embed = disnake.Embed(title=setup_title, description=setup_description, color=setup_color)
-        message_sent = await setup_channel.send(embed=embed)
-        if setup_include_roles:
-            for emoji in setup_emojis:
-                await message_sent.add_reaction(emoji)
-        else:
-            for emoji in setup_emojis:
-                await message_sent.add_reaction(emoji)  # Add reactions even if there's no roles associated
-    elif setup_step == "emoji_list":
-        setup_emojis = message.content.split()  # Split by whitespace to get each emoji
-        setup_step = None
-        print(f"Roles: {setup_roles}")  # Debug: print roles
-        print(f"Emojis: {setup_emojis}")  # Debug: print emojis
-        await clear_channel_messages(message.channel)  # Clear messages in channel
-        embed = disnake.Embed(title=setup_title, description=setup_description, color=setup_color)
-        message_sent = await message.channel.send(embed=embed)
-        if setup_include_roles:
-            for emoji in setup_emojis:
-                await message_sent.add_reaction(emoji)
-        else:
-            for emoji in setup_emojis:
-                await message_sent.add_reaction(emoji)  # Add reactions even if there's no roles associated
+        setup["step"] = None
+        await clear_channel_messages(message.channel)
 
+        color_map = retrieve_color_map()
+        color_hex = color_map.get(setup["color"], 0x000000)
+
+        embed = disnake.Embed(title=setup["title"], description=setup["description"], color=color_hex)
+        message_sent = await setup_channel.send(embed=embed)
+        setup["message_id"] = message_sent.id
+
+        if setup["include_roles"]:
+            for emoji in setup["emojis"]:
+                await message_sent.add_reaction(emoji)
+        else:
+            for emoji in setup["emojis"]:
+                await message_sent.add_reaction(emoji)
 
 async def clear_channel_messages(channel):
     async for message in channel.history(limit=100):
@@ -1141,38 +1220,49 @@ async def clear_channel_messages(channel):
         except:
             pass
 
+def retrieve_color_map():
+    return color_map
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    if payload.member.bot:
-        pass
-    else:
-        emoji = str(payload.emoji)
-        if emoji in setup_emojis:
-            idx = setup_emojis.index(emoji)
-            role = disnake.utils.get(payload.member.guild.roles, id=setup_roles[idx].id)
-            if role in payload.member.roles:
-                await payload.member.remove_roles(role)  # Remove role if member already has it
-            else:
-                await payload.member.add_roles(role)  # Add role if member doesn't have it
+    if payload.member.bot or payload.guild_id not in setups:
+        return
 
+    for setup in setups[payload.guild_id]:
+        if setup['message_id'] != payload.message_id:
+            continue
+
+        emoji = str(payload.emoji)
+        if emoji in setup["emojis"]:
+            idx = setup["emojis"].index(emoji)
+            role = disnake.utils.get(payload.member.guild.roles, id=setup["roles"][idx].id)
+            if role in payload.member.roles:
+                await payload.member.remove_roles(role)
+            else:
+                await payload.member.add_roles(role)
+            break
 
 @bot.event
 async def on_raw_reaction_remove(payload):
     guild = bot.get_guild(payload.guild_id)
-    if guild is None:
+    if guild is None or payload.guild_id not in setups:
         return
 
     member = guild.get_member(payload.user_id)
     if member is None or member.bot:
         return
 
-    emoji = str(payload.emoji)
-    if emoji in setup_emojis:
-        idx = setup_emojis.index(emoji)
-        role = disnake.utils.get(guild.roles, id=setup_roles[idx].id)
-        if role in member.roles:
-            await member.remove_roles(role)
+    for setup in setups[payload.guild_id]:
+        if setup['message_id'] != payload.message_id:
+            continue
+
+        emoji = str(payload.emoji)
+        if emoji in setup["emojis"]:
+            idx = setup["emojis"].index(emoji)
+            role = disnake.utils.get(guild.roles, id=setup["roles"][idx].id)
+            if role in member.roles:
+                await member.remove_roles(role)
+            break
 
 
 #Random commands that are use full
