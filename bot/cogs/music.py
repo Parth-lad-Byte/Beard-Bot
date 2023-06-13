@@ -1323,30 +1323,76 @@ async def avatar(ctx, user: disnake.User = None):
     await ctx.send(embed=embed)
 
 @bot.slash_command(description='Check user info and ban history')
+@disnake.ext.commands.has_permissions(administrator=True)
 async def userinfo(ctx: disnake.ApplicationCommandInteraction, member: disnake.Member):
     # Get user info
-    created_at = member.created_at.strftime('%Y-%m-%d %H:%M:%S')
-    joined_at = member.joined_at.strftime('%Y-%m-%d %H:%M:%S')
-    roles = ', '.join(role.name for role in member.roles if role != ctx.guild.default_role)
-    user_info = f'**Username:** {member.name}\n**ID:** {member.id}\n**Created at:** {created_at}\n**Joined at:** {joined_at}\n**Roles:** {roles or "None"}'
-    
+    created_at = member.created_at.strftime('%a, %b %d, %Y %I:%M %p')
+    joined_at = member.joined_at.strftime('%a, %b %d, %Y %I:%M %p')
+    roles = [role.mention for role in member.roles if role != ctx.guild.default_role]
+
+    # Get user's key permissions
+    key_permissions = {'kick_members', 'ban_members', 'administrator', 'manage_channels', 'manage_guild',
+                    'view_audit_log', 'manage_messages', 'mention_everyone', 'manage_roles', 'manage_webhooks',
+                    'manage_emojis'}
+
+    # Get user's key permissions, only if they are in the set defined above
+    permissions = [perm[0].replace("_", " ").title() for perm in member.guild_permissions if perm[1] and perm[0] in key_permissions]
+
     # Get ban history
-    bans = await ctx.guild.bans().flatten()
-    ban_entry = [entry for entry in bans if entry.user.id == member.id]
-    
+    async for ban_entry in ctx.guild.bans():
+        if ban_entry.user.id == member.id:
+            break
+    else:
+        ban_entry = None
+
     if ban_entry:
-        ban_info = f'**Banned at:** {ban_entry[0].created_at}\n**Reason:** {ban_entry[0].reason}'
+        ban_info = f'Banned at: {ban_entry.created_at}\nReason: {ban_entry.reason}'
     else:
         ban_info = 'No ban history found'
-    
+
     # Create embed
-    embed = disnake.Embed(title=f'User Info for {member.name}', color=disnake.Color.blue())
+    embed = disnake.Embed(color=disnake.Color.blue())
+    
+    # Show avatar and username#discriminator
+    if member.avatar:
+        embed.set_author(name=f'{member}', icon_url=member.avatar.url)
+    else:
+        embed.set_author(name=f'{member}')
     embed.set_thumbnail(url=member.avatar.url)
-    embed.add_field(name='User Info', value=user_info, inline=False)
+    embed.add_field(name='Joined', value=f'{joined_at}', inline=True)
+    embed.add_field(name='Registered', value=f'{created_at}', inline=True)
+    embed.add_field(name=f'Roles [{len(roles)}]', value=', '.join(roles) or "None", inline=False)
+    
+    # Add Key Permissions field if there are any
+    if permissions:
+        embed.add_field(name='Key Permissions', value=', '.join(permissions), inline=False)
+    
     embed.add_field(name='Ban History', value=ban_info, inline=False)
-    embed.set_footer(text=f'Requested by {ctx.author.name}')
+    
+    # Add Acknowledgements field if member is server owner
+    if member == ctx.guild.owner:
+        embed.add_field(name='Acknowledgements', value='Server Owner', inline=False)
+
+    # Footer with ID, Requested by and Requested at
+    embed.set_footer(text=f'ID: {member.id} | Requested by {ctx.author.name} | {datetime.datetime.now().strftime("Today at %I:%M %p")}')
     
     await ctx.response.send_message(embed=embed)
+
+@userinfo.error
+async def userinfo_error(ctx, error):
+    if isinstance(error, disnake.commands.MissingPermissions):
+        await ctx.send("You do not have permission to use this command.")
+    else:
+        raise error
+
+
+
+
+
+
+
+
+
 
 #Ban command 
 @bot.slash_command(description='Ban a user from the server.')
