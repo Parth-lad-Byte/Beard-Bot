@@ -31,7 +31,11 @@ from disnake import Option
 from discord.ext import tasks
 from bot.utils.colors import color_map
 from disnake.app_commands import OptionType
-
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import io
+from collections import defaultdict
+import numpy as np
 
 
 user_preferences = {}
@@ -1437,9 +1441,120 @@ async def role(self, inter: disnake.ApplicationCommandInteraction, action: str, 
     else:
         await inter.response.send_message('Invalid action. Please provide either "add" or "remove".')
 
+
+#polls 
+polls = {}
+
+@bot.slash_command(
+    description="Setup a new poll",
+    options=[
+        Option("channel", "Mention of the channel to create the poll in", 3, required=True),
+        Option("question", "The poll question", 3, required=True),
+        Option("option_1", "Option 1", 3, required=True),
+        Option("option_2", "Option 2", 3, required=True),  # make option_2 required
+        Option("option_3", "Option 3", 3, required=False),  # include option_3
+        Option("option_4", "Option 4", 3, required=False),
+        Option("option_5", "Option 5", 3, required=False),
+        Option("option_6", "Option 6", 3, required=False),
+        Option("option_7", "Option 7", 3, required=False),
+        Option("option_8", "Option 8", 3, required=False),
+        Option("option_9", "Option 9", 3, required=False),
+        Option("option_10", "Option 10", 3, required=False),
+    ]
+)
+async def pollsetup(ctx, channel: str, question: str, option_1: str, option_2: str, option_3: str = None,
+                    option_4: str = None, option_5: str = None, option_6: str = None, option_7: str = None,
+                    option_8: str = None, option_9: str = None, option_10: str = None):
+    channel_id = int(channel.strip('<#>'))  # Extract the ID from the mention
+
+    channel = bot.get_channel(int(channel_id))
+    if channel is None:
+        await ctx.send("Invalid channel ID.")
+        return
+
+    # Create a list of options. Ignore the ones that are None.
+    options = [opt for opt in (option_1, option_2, option_3, option_4, option_5, option_6, option_7, option_8, option_9, option_10) if opt is not None]
+
+    poll_embed = disnake.Embed(title=f"**{question}**", color=disnake.Color.blue())
+    for index, option in enumerate(options, start=1):
+        poll_embed.add_field(name=f"Option {index}", value=option, inline=False)
+
+    message = await channel.send(embed=poll_embed)
+
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    for emoji in number_emojis[:len(options)]:
+        await message.add_reaction(emoji)
+
+    polls[channel.id] = (message.id, options)
+
+@bot.slash_command(description="End a poll and display the results")
+async def pollend(ctx, channel: disnake.TextChannel):
+    if channel.id not in polls:
+        await ctx.send('No active poll in that channel.')
+        return
+
+    message_id, options = polls[channel.id]
+    message = await channel.fetch_message(message_id)
+
+    results = defaultdict(int)
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    for reaction in message.reactions:
+        if str(reaction.emoji) in number_emojis:
+            index = number_emojis.index(str(reaction.emoji))
+            results[index] += reaction.count - 1
+
+    # Switch to dark mode
+    plt.style.use('dark_background')
+
+    # Create a bar plot with a specific size
+    fig, ax = plt.subplots(figsize=(8, 6))  # Adjust the size as needed
+
+    # Customize the plot appearance
+    colors = ['#FF6F61', '#6B5B95', '#88B04B', '#F7CAC9', '#92A8D1', '#955251', '#B565A7', '#009B77', '#DD4124', '#D65076']
+    y_pos = list(range(len(results)))
+    ax.barh(y_pos, list(results.values()), height=0.6, color=colors)
+
+    # Remove spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+
+    # Add labels and ticks
+    ax.set_xlabel('Votes', fontsize=14)
+    ax.set_ylabel('Options', fontsize=14)
+    ax.set_title('Poll Results', fontsize=16)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(options, fontsize=12)
+
+    # Add vote count labels
+    for i, v in enumerate(results.values()):
+        ax.text(v + 0.1, i, str(v), color='white', va='center', fontsize=12)
+
+    # Adjust x-axis limits and ticks
+    ax.set_xlim(0, max(results.values()) + 2)
+    ax.set_xticks(range(0, max(results.values()) + 2, 2))
+    ax.tick_params(axis='x', labelsize=12)
+
+    # Save the plot to a BytesIO object
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+
+    # Create an Embed message
+    embed = disnake.Embed(
+        title="Poll Results",
+        description="Here are the results of the poll.",
+        color=disnake.Color.blue()
+    )
+
+    for index, option in enumerate(options, start=1):
+        embed.add_field(name=option, value=f"{results[index-1]} votes", inline=False)
+
+    # Send the results as an embed and the graph as an image
+    await ctx.send(embed=embed, file=disnake.File(buf, 'results.png'))
     
 
-#agem patch  
+
+#game patch  
 @bot.slash_command()
 async def set_patch_notes_channel(ctx, channel: disnake.TextChannel):
     # Save the chosen channel in bot's storage
