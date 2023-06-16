@@ -36,7 +36,7 @@ import matplotlib.pyplot as plt
 import io
 from collections import defaultdict
 import numpy as np
-
+import seaborn as sns
 
 user_preferences = {}
 # Store the currently playing song for each guild
@@ -1451,8 +1451,8 @@ polls = {}
         Option("channel", "Mention of the channel to create the poll in", 3, required=True),
         Option("question", "The poll question", 3, required=True),
         Option("option_1", "Option 1", 3, required=True),
-        Option("option_2", "Option 2", 3, required=True),  # make option_2 required
-        Option("option_3", "Option 3", 3, required=False),  # include option_3
+        Option("option_2", "Option 2", 3, required=True),
+        Option("option_3", "Option 3", 3, required=False),
         Option("option_4", "Option 4", 3, required=False),
         Option("option_5", "Option 5", 3, required=False),
         Option("option_6", "Option 6", 3, required=False),
@@ -1476,12 +1476,14 @@ async def pollsetup(ctx, channel: str, question: str, option_1: str, option_2: s
     options = [opt for opt in (option_1, option_2, option_3, option_4, option_5, option_6, option_7, option_8, option_9, option_10) if opt is not None]
 
     poll_embed = disnake.Embed(title=f"**{question}**", color=disnake.Color.blue())
+
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
     for index, option in enumerate(options, start=1):
-        poll_embed.add_field(name=f"Option {index}", value=option, inline=False)
+        poll_embed.add_field(name=f"{number_emojis[index-1]} {option}", value="\u200B", inline=False)
 
     message = await channel.send(embed=poll_embed)
 
-    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     for emoji in number_emojis[:len(options)]:
         await message.add_reaction(emoji)
 
@@ -1506,52 +1508,69 @@ async def pollend(ctx, channel: disnake.TextChannel):
     # Switch to dark mode
     plt.style.use('dark_background')
 
-    # Create a bar plot with a specific size
-    fig, ax = plt.subplots(figsize=(8, 6))  # Adjust the size as needed
+    # Create a bar plot with adjusted size
+    fig, ax = plt.subplots(figsize=(12, 0.8 * len(results)))
 
     # Customize the plot appearance
     colors = ['#FF6F61', '#6B5B95', '#88B04B', '#F7CAC9', '#92A8D1', '#955251', '#B565A7', '#009B77', '#DD4124', '#D65076']
-    y_pos = list(range(len(results)))
-    ax.barh(y_pos, list(results.values()), height=0.6, color=colors)
+    y_pos = list(range(len(results), 0, -1))
+    ax.barh(y_pos, results.values(), color=colors[:len(results)], edgecolor='none', height=0.8)
 
-    # Remove spines
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    # Remove axis labels and ticks
+    ax.xaxis.set_visible(False)
+    ax.yaxis.set_visible(False)
 
-    # Add labels and ticks
-    ax.set_xlabel('Votes', fontsize=14)
-    ax.set_ylabel('Options', fontsize=14)
-    ax.set_title('Poll Results', fontsize=16)
-    ax.set_yticks(y_pos)
-    ax.set_yticklabels(options, fontsize=12)
+    # Remove the plot frame
+    for spine in ax.spines.values():
+        spine.set_visible(False)
 
-    # Add vote count labels
+    # Add vote count labels to the right of each bar
     for i, v in enumerate(results.values()):
-        ax.text(v + 0.1, i, str(v), color='white', va='center', fontsize=12)
+        ax.text(v + 0.1, len(results)-i-1, f'{v} votes ({v/sum(results.values()):.1%})', color='white', va='center', ha='left')
 
-    # Adjust x-axis limits and ticks
-    ax.set_xlim(0, max(results.values()) + 2)
-    ax.set_xticks(range(0, max(results.values()) + 2, 2))
-    ax.tick_params(axis='x', labelsize=12)
+    # Add options labels to the left of each bar (no emoji or vote count)
+    for i, option in enumerate(options):
+        ax.text(0, len(results)-i-1, option, color='white', va='center', ha='right')
 
     # Save the plot to a BytesIO object
     buf = io.BytesIO()
-    plt.savefig(buf, format='png')
+    plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
     buf.seek(0)
 
     # Create an Embed message
     embed = disnake.Embed(
         title="Poll Results",
-        description="Here are the results of the poll.",
+        description="",
         color=disnake.Color.blue()
     )
 
+    # Add options and their vote counts as fields in the same line
     for index, option in enumerate(options, start=1):
-        embed.add_field(name=option, value=f"{results[index-1]} votes", inline=False)
+        embed.add_field(name=f"{number_emojis[index-1]} {option} : {results[index-1]} votes", value="\u200b", inline=False)
 
-    # Send the results as an embed and the graph as an image
-    await ctx.send(embed=embed, file=disnake.File(buf, 'results.png'))
-    
+    # Add the bar graph image to the embed message
+    file = disnake.File(buf, 'results.png')
+    embed.set_image(url="attachment://results.png")
+
+    # Send the results as an embed
+    await ctx.send(embed=embed, file=file)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 #game patch  
