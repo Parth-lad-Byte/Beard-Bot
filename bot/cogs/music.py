@@ -48,6 +48,8 @@ from collections import defaultdict
 import uuid
 from bot.utils.prizes import prizes
 from disnake import TextChannel
+import logging
+
 
 user_preferences = {}
 # Store the currently playing song for each guild
@@ -287,6 +289,8 @@ class Music(commands.Cog):
                     self.queues.pop(guild_id, None)
             except Exception as e:
                 self.logger.error(f'Error in play_next_song for guild {guild_id}: {e}', exc_info=True)
+
+
 
     @commands.command()
     async def join(self, ctx):
@@ -1772,6 +1776,12 @@ async def setup_commit(interaction, user: str, repo: str, channel: TextChannel):
     await interaction.response.send_message(f"Bot is now checking for new commits in {user}/{repo} every 5 minutes and posting updates in {channel.mention}.")
 
 
+logging.basicConfig(level=logging.INFO)
+
+latest_commit_sha = None
+
+latest_commit_sha = None
+
 @tasks.loop(minutes=5)
 async def check_commits(user, repo, channel_id):
     global latest_commit_sha
@@ -1782,17 +1792,22 @@ async def check_commits(user, repo, channel_id):
 
     if response.status_code == 200:
         commits = json.loads(response.text)
-        commit_message = ""
 
         # Let's get the latest commit
         commit = commits[0]
         if commit['sha'] != latest_commit_sha:
             latest_commit_sha = commit['sha']
-            commit_message += f"Author: {commit['commit']['author']['name']}\nMessage: {commit['commit']['message']}\nUrl: {commit['html_url']}\n\n"
+
+            # Create embed
+            embed = Embed(title=f"New commit in {user}/{repo}")
+            embed.add_field(name="Author", value=commit['commit']['author']['name'])
+            embed.add_field(name="Message", value=commit['commit']['message'])
+            embed.add_field(name="URL", value=commit['html_url'])
+            embed.set_image(url=f"https://opengraph.githubassets.com/{commit['sha']}/{user}/{repo}")
 
             # Send message in chat
             channel = bot.get_channel(channel_id)
-            await channel.send(commit_message)
+            await channel.send(embed=embed)
 
     else:
         channel = bot.get_channel(channel_id)
@@ -2036,6 +2051,6 @@ def save_data():
         print('Data saved successfully.')
     except Exception as e:
         print(f'Failed to save data: {e}')
-
+        
 # Run the bot
 bot.run(TOKEN)
