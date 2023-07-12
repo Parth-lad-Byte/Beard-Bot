@@ -386,7 +386,7 @@ async def play_song(ctx, info):
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     }
 
-    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='c:/ffmpeg/bin/ffmpeg.exe')
+    source = disnake.FFmpegPCMAudio(url, **FFMPEG_OPTIONS, executable='/usr/bin/ffmpeg') # chanage the path here
     volume_transformer = disnake.PCMVolumeTransformer(source)
     
     # After the current song ends, it will play the next song in the queue.
