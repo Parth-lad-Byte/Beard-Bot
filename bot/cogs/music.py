@@ -288,8 +288,6 @@ class Music(commands.Cog):
             except Exception as e:
                 self.logger.error(f'Error in play_next_song for guild {guild_id}: {e}', exc_info=True)
 
-
-
     @commands.command()
     async def join(self, ctx):
         channel = ctx.author.voice.channel
