@@ -1,0 +1,13 @@
+disnake
+spotipy
+requests
+beautifulsoup4
+yt-dlp
+psutil
+discord
+aiohttp
+epicstore-api
+google-api-python-client
+matplotlib
+numpy
+seaborn
