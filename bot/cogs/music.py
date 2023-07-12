@@ -1771,14 +1771,18 @@ async def getcommits(interaction, user: str, repo: str):
         await interaction.response.send_message("Couldn't get the commits. Please make sure the repo and the username are correct.")
 
 @bot.slash_command(name='setup_commit', description='Set up the bot to check for new commits every 5 minutes')
-async def setup_commit(interaction, user: str, repo: str, channel: TextChannel):
-    check_commits.start(user, repo, channel.id)
-    await interaction.response.send_message(f"Bot is now checking for new commits in {user}/{repo} every 5 minutes and posting updates in {channel.mention}.")
+async def setup_commit(interaction, user: str, repo: str, channels: str):
+    channel_names = channels.split(',')
+    for channel_name in channel_names:
+        channel = discord.utils.get(interaction.guild.channels, name=channel_name)
+        if channel is not None:
+            check_commits.start(user, repo, channel.id)
+    await interaction.response.send_message(f"Bot is now checking for new commits in {user}/{repo} every 5 minutes and posting updates in the specified channels.")
 
 
 logging.basicConfig(level=logging.INFO)
 
-latest_commit_sha = None
+
 
 latest_commit_sha = None
 
