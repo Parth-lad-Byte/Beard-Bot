@@ -2039,8 +2039,5 @@ def save_data():
     except Exception as e:
         print(f'Failed to save data: {e}')
 
-
-
-
 # Run the bot
 bot.run(TOKEN)
